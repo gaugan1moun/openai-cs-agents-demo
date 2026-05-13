@@ -14,7 +14,7 @@ class AirlineAgentContext(BaseModel):
     account_number: str | None = None  # Account number associated with the customer
     itinerary: list[dict[str, str]] | None = None  # Internal only (not surfaced to UI)
     baggage_claim_id: str | None = None  # Internal only (not surfaced to UI)
-    compensation_case_id: str | None = None
+    compensation_case_id: str | None = None  # Internal only (not surfaced to UI)
     scenario: str | None = None
     vouchers: list[str] | None = None
     special_service_note: str | None = None
@@ -58,4 +58,6 @@ def public_context(ctx: AirlineAgentContext) -> dict:
     # Only surface vouchers once granted
     if not data.get("vouchers"):
         data.pop("vouchers", None)
+    # Remove None values to keep the UI payload clean
+    data = {k: v for k, v in data.items() if v is not None}
     return data
