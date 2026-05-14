@@ -86,7 +86,9 @@ This app is designed for demonstration purposes. Feel free to update the agent p
 
 ## Agents included
 
-- Triage Agent: entry point that routes to specialists.
-- Flight Information Agent: shares live status, connection risk, and alternate options.
-- Booking & Cancellation Agent: books, rebooks, or cancels trips.
-- Seat & Special S
+- **Triage Agent**: entry point that routes to specialists.
+- **Sales Agent**: handles product inquiries and purchase-related questions.
+- **Refund Agent**: handles refund and return requests.
+- **FAQ Agent**: answers common questions using a knowledge base.
+
+> **Note (personal):** The handoff mechanism between the Triage Agent and the specialist agents is the most interesting part to study — see `python-backend/agents/` for the routing logic.
