@@ -1,116 +1,148 @@
-from __future__ import annotations as _annotations
+"""Main entry point for the OpenAI Customer Service Agents Demo (Airline).
 
-import json
-import os
-from typing import Any, Dict
+Runs a FastAPI server that exposes a chat endpoint for the airline
+customer-service multi-agent pipeline.
+"""
 
-from chatkit.server import StreamingResult
-from fastapi import Depends, FastAPI, Query, Request
+from __future__ import annotations
+
+import logging
+import uuid
+from typing import Any
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel
 
-from airline.agents import (
-    booking_cancellation_agent,
-    faq_agent,
-    flight_information_agent,
-    refunds_compensation_agent,
-    seat_special_services_agent,
-    triage_agent,
+from agents import Runner, trace
+
+from airline.agents import triage_agent
+from airline.context import AirlineAgentContext, AirlineAgentChatContext, create_initial_context
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+app = FastAPI(
+    title="Airline CS Agents Demo",
+    description="Multi-agent customer-service demo powered by OpenAI Agents SDK.",
+    version="0.1.0",
 )
-from airline.context import (
-    AirlineAgentChatContext,
-    AirlineAgentContext,
-    create_initial_context,
-    public_context,
-)
-from server import AirlineServer
 
-app = FastAPI()
-
-# Disable tracing for zero data retention orgs
-os.environ.setdefault("OPENAI_TRACING_DISABLED", "1")
-
-# CORS configuration (adjust as needed for deployment)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],  # tighten for production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-chat_server = AirlineServer()
+# In-memory session store: session_id -> AirlineAgentChatContext
+_sessions: dict[str, AirlineAgentChatContext] = {}
 
 
-def get_server() -> AirlineServer:
-    return chat_server
+# ---------------------------------------------------------------------------
+# Request / Response schemas
+# ---------------------------------------------------------------------------
+class ChatRequest(BaseModel):
+    message: str
+    session_id: str | None = None
+    # Optional: caller can supply booking/flight info to pre-populate context
+    account_number: str | None = None
+    confirmation_number: str | None = None
 
 
-@app.post("/chatkit")
-async def chatkit_endpoint(
-    request: Request, server: AirlineServer = Depends(get_server)
-) -> Response:
-    payload = await request.body()
-    result = await server.process(payload, {"request": request})
-    if isinstance(result, StreamingResult):
-        return StreamingResponse(result, media_type="text/event-stream")
-    if hasattr(result, "json"):
-        return Response(content=result.json, media_type="application/json")
-    return Response(content=result)
+class ChatResponse(BaseModel):
+    session_id: str
+    response: str
+    agent_name: str | None = None
 
 
-@app.get("/chatkit/state")
-async def chatkit_state(
-    thread_id: str = Query(...),
-    server: AirlineServer = Depends(get_server),
-) -> Dict[str, Any]:
-    return await server.snapshot(thread_id, {"request": None})
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
+
+def _get_or_create_session(
+    session_id: str | None,
+    account_number: str | None,
+    confirmation_number: str | None,
+) -> tuple[str, AirlineAgentChatContext]:
+    """Return (session_id, chat_context), creating a new session when needed."""
+    if session_id and session_id in _sessions:
+        return session_id, _sessions[session_id]
+
+    new_id = session_id or str(uuid.uuid4())
+    agent_ctx: AirlineAgentContext = create_initial_context(
+        account_number=account_number,
+        confirmation_number=confirmation_number,
+    )
+    chat_ctx = AirlineAgentChatContext(context=agent_ctx, history=[])
+    _sessions[new_id] = chat_ctx
+    logger.info("Created new session %s", new_id)
+    return new_id, chat_ctx
 
 
-@app.get("/chatkit/bootstrap")
-async def chatkit_bootstrap(
-    server: AirlineServer = Depends(get_server),
-) -> Dict[str, Any]:
-    return await server.snapshot(None, {"request": None})
-
-
-@app.get("/chatkit/state/stream")
-async def chatkit_state_stream(
-    thread_id: str = Query(...),
-    server: AirlineServer = Depends(get_server),
-):
-    thread = await server.ensure_thread(thread_id, {"request": None})
-    queue = server.register_listener(thread.id)
-
-    async def event_generator():
-        try:
-            initial = await server.snapshot(thread.id, {"request": None})
-            yield f"data: {json.dumps(initial, default=str)}\n\n"
-            while True:
-                data = await queue.get()
-                yield f"data: {data}\n\n"
-        finally:
-            server.unregister_listener(thread.id, queue)
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
-
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
 @app.get("/health")
-async def health_check() -> Dict[str, str]:
-    return {"status": "healthy"}
+async def health() -> dict[str, str]:
+    """Simple liveness probe."""
+    return {"status": "ok"}
 
 
-__all__ = [
-    "AirlineAgentChatContext",
-    "AirlineAgentContext",
-    "app",
-    "booking_cancellation_agent",
-    "chat_server",
-    "create_initial_context",
-    "faq_agent",
-    "flight_information_agent",
-    "public_context",
-    "refunds_compensation_agent",
-    "seat_special_services_agent",
-    "triage_agent",
-]
+@app.post("/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest) -> ChatResponse:
+    """Accept a user message and return the agent's reply."""
+    session_id, chat_ctx = _get_or_create_session(
+        req.session_id, req.account_number, req.confirmation_number
+    )
+
+    # Append the new user turn to history
+    chat_ctx.history.append({"role": "user", "content": req.message})
+
+    try:
+        with trace("airline-cs-demo", group_id=session_id):
+            result = await Runner.run(
+                triage_agent,
+                input=chat_ctx.history,
+                context=chat_ctx.context,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Agent run failed for session %s", session_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    assistant_message: str = result.final_output or ""
+    last_agent: Any = result.last_agent
+    agent_name: str | None = getattr(last_agent, "name", None)
+
+    # Persist the assistant turn
+    chat_ctx.history.append({"role": "assistant", "content": assistant_message})
+
+    return ChatResponse(
+        session_id=session_id,
+        response=assistant_message,
+        agent_name=agent_name,
+    )
+
+
+@app.delete("/session/{session_id}")
+async def delete_session(session_id: str) -> dict[str, str]:
+    """Clear a session from the in-memory store."""
+    _sessions.pop(session_id, None)
+    return {"deleted": session_id}
+
+
+# ---------------------------------------------------------------------------
+# Dev server entry-point
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
