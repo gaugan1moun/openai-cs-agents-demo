@@ -79,47 +79,18 @@ MOCK_ITINERARIES = {
     },
 }
 
+# Default scenario to load when no confirmation number is provided by the user.
+# Swap to "on_time" to demo the happy-path flow instead of the disruption flow.
+DEFAULT_SCENARIO = "disrupted"
+
 
 def apply_itinerary_defaults(ctx: AirlineAgentContext, scenario_key: str | None = None) -> None:
-    """Populate the context with a demo itinerary if missing."""
-    target_key = scenario_key or ctx.scenario or "disrupted"
-    data = MOCK_ITINERARIES.get(target_key) or next(iter(MOCK_ITINERARIES.values()))
-    ctx.scenario = target_key
-    ctx.passenger_name = ctx.passenger_name or data.get("passenger_name")
-    ctx.confirmation_number = ctx.confirmation_number or data.get("confirmation_number")
-    segments = data.get("segments", [])
-    if ctx.flight_number is None and segments:
-        ctx.flight_number = segments[0].get("flight_number")
-    ctx.seat_number = ctx.seat_number or data.get("seat_number")
-    if ctx.itinerary is None:
-        ctx.itinerary = deepcopy(segments)
-    # Set trip endpoints for display without exposing the full itinerary
-    if segments:
-        ctx.origin = ctx.origin or segments[0].get("origin")
-        ctx.destination = ctx.destination or segments[-1].get("destination")
+    """Populate the context with a demo itinerary if missing.
 
+    Uses DEFAULT_SCENARIO when no scenario_key is supplied.
+    """
+    if scenario_key is None:
+        scenario_key = DEFAULT_SCENARIO
 
-def get_itinerary_for_flight(flight_number: str | None) -> tuple[str, dict] | None:
-    """Return (scenario_key, itinerary) if the flight is present in a mock itinerary."""
-    if not flight_number:
-        return None
-    for key, itinerary in MOCK_ITINERARIES.items():
-        for segment in itinerary.get("segments", []):
-            if segment.get("flight_number", "").lower() == flight_number.lower():
-                return key, itinerary
-        for segment in itinerary.get("rebook_options", []):
-            if segment.get("flight_number", "").lower() == flight_number.lower():
-                return key, itinerary
-    return None
-
-
-def active_itinerary(ctx: AirlineAgentContext) -> tuple[str, dict]:
-    """Resolve the active itinerary for the current context."""
-    if ctx.scenario and ctx.scenario in MOCK_ITINERARIES:
-        return ctx.scenario, MOCK_ITINERARIES[ctx.scenario]
-    match = get_itinerary_for_flight(ctx.flight_number)
-    if match:
-        ctx.scenario = match[0]
-        return match
-    ctx.scenario = "disrupted"
-    return ctx.scenario, MOCK_ITINERARIES["disrupted"]
+    if ctx.itinerary is None and scenario_key in MOCK_ITINERARIES:
+        ctx.itinerary = deepcopy(MOCK_ITINERARIES[scenario_key])
